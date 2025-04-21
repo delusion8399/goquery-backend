@@ -1,0 +1,30 @@
+# Git
+.git
+.gitignore
+
+# Docker
+Dockerfile
+docker-compose.yml
+.dockerignore
+
+# IDE specific files
+.idea
+.vscode
+*.swp
+*.swo
+
+# Logs
+*.log
+
+# Build artifacts
+/tmp
+
+# Local development
+README.md
+DOCKER_README.md
+
+# Dependency directories
+/vendor/
+
+# Environment variables
+.env.example

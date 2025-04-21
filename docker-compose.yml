@@ -1,0 +1,22 @@
+version: '3.8'
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: goquery-api
+    ports:
+      - "${APP_PORT:-9000}:9000"
+    environment:
+      - APP_PORT=${APP_PORT:-9000}
+      - APP_ENV=${APP_ENV:-development}
+      - MONGO_URI=${MONGO_URI}
+      - MONGO_DATABASE=${MONGO_DATABASE:-goquery}
+      - JWT_SECRET=${JWT_SECRET:-your-super-secret-key-change-in-production}
+      - JWT_EXPIRY=${JWT_EXPIRY:-168h}
+      - ALLOW_ORIGINS=${ALLOW_ORIGINS:-http://localhost:3000}
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-your-openrouter-api-key}
+    volumes:
+      - ./.env:/app/.env
+    restart: unless-stopped
