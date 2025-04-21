@@ -1,0 +1,4 @@
+gq.maxxfibernet.in {
+    reverse_proxy goquery:9000
+}
+

@@ -1,11 +1,10 @@
 version: '3.8'
 
 services:
-  api:
+  goquery:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: goquery-api
     ports:
       - "${APP_PORT:-9000}:9000"
     environment:
@@ -20,3 +19,18 @@ services:
     volumes:
       - ./.env:/app/.env
     restart: unless-stopped
+  caddy:
+    image: caddy:latest
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  caddy_data:
+  caddy_config:
