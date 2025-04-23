@@ -2,7 +2,9 @@ package models
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"math"
 	"time"
 
 	"github.com/zucced/goquery/database"
@@ -14,6 +16,56 @@ import (
 
 // QueryResult represents a row in the query results
 type QueryResult map[string]interface{}
+
+// MarshalJSON implements the json.Marshaler interface for QueryResult
+// to handle special values like NaN and Infinity
+func (qr QueryResult) MarshalJSON() ([]byte, error) {
+	// Create a sanitized copy of the map
+	sanitized := make(map[string]interface{})
+	for k, v := range qr {
+		sanitized[k] = sanitizeJSONValue(v)
+	}
+
+	// Use the standard JSON marshaler on the sanitized map
+	return json.Marshal(sanitized)
+}
+
+// sanitizeJSONValue handles special values like NaN and Infinity that can't be serialized to JSON
+func sanitizeJSONValue(value interface{}) interface{} {
+	// Check for float64 NaN or Infinity
+	if f, ok := value.(float64); ok {
+		if math.IsNaN(f) {
+			return "NaN" // Convert NaN to string
+		}
+		if math.IsInf(f, 1) {
+			return "Infinity" // Convert positive infinity to string
+		}
+		if math.IsInf(f, -1) {
+			return "-Infinity" // Convert negative infinity to string
+		}
+	}
+
+	// Handle maps recursively
+	if m, ok := value.(map[string]interface{}); ok {
+		result := make(map[string]interface{})
+		for k, v := range m {
+			result[k] = sanitizeJSONValue(v)
+		}
+		return result
+	}
+
+	// Handle slices recursively
+	if s, ok := value.([]interface{}); ok {
+		result := make([]interface{}, len(s))
+		for i, v := range s {
+			result[i] = sanitizeJSONValue(v)
+		}
+		return result
+	}
+
+	// Return the value as is for other types
+	return value
+}
 
 // QueryStatus represents the status of a query
 type QueryStatus string
@@ -39,6 +91,18 @@ type Query struct {
 	ExecutionTime string             `json:"execution_time,omitempty" bson:"execution_time,omitempty"`
 	CreatedAt     time.Time          `json:"created_at" bson:"created_at"`
 	UpdatedAt     time.Time          `json:"updated_at" bson:"updated_at"`
+}
+
+// MarshalJSON implements the json.Marshaler interface for Query
+// to handle special values like NaN and Infinity in the Results field
+func (q Query) MarshalJSON() ([]byte, error) {
+	type Alias Query // Use a type alias to avoid infinite recursion
+
+	// Convert the Query to the alias type
+	aliasValue := Alias(q)
+
+	// Marshal the alias value
+	return json.Marshal(aliasValue)
 }
 
 // QueryCollection returns the queries collection
