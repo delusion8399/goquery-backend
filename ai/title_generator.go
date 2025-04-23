@@ -30,7 +30,7 @@ Title:`, naturalQuery)
 
 	// Create request
 	request := OpenRouterRequest{
-		Model: "google/gemini-pro", // Using Gemini Pro model
+		Model: "google/gemini-2.0-flash-exp:free",
 		Messages: []OpenRouterChatMessage{
 			{
 				Role:    "user",
@@ -92,7 +92,7 @@ Title:`, naturalQuery)
 	// Clean up the title
 	generatedTitle = strings.TrimSpace(generatedTitle)
 	generatedTitle = strings.Trim(generatedTitle, "\"'")
-	
+
 	// If title is empty, provide a default
 	if generatedTitle == "" {
 		generatedTitle = "Database Query"

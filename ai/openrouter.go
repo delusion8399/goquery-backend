@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/zucced/goquery/config"
 	"github.com/zucced/goquery/models"
@@ -43,8 +44,10 @@ type OpenRouterResponse struct {
 	} `json:"choices"`
 }
 
-// GenerateSQL generates SQL from a natural language query using OpenRouter's Gemini model
+// GenerateSQL generates a database query from a natural language query using OpenRouter's Gemini model
 func GenerateSQL(naturalQuery string, db *models.Database, cfg *config.Config) (string, error) {
+	// Start timing the query generation
+	startTime := time.Now()
 	// Get API key from config
 	apiKey := cfg.OpenRouterAPIKey
 	if apiKey == "" {
@@ -77,8 +80,36 @@ func GenerateSQL(naturalQuery string, db *models.Database, cfg *config.Config) (
 		}
 	}
 
-	// Create prompt
-	prompt := fmt.Sprintf(`You are an expert SQL query generator for %s databases.
+	// Create prompt based on database type
+	var prompt string
+	if db.Type == "mongodb" {
+		prompt = fmt.Sprintf(`You are an expert MongoDB query generator for Go applications.
+Given the following database schema and natural language query, generate Go code that uses the MongoDB Go driver to execute the query.
+Only return the Go code without any explanation or markdown formatting.
+Use the following format for your response:
+
+// Collection to query
+collection := "collection_name"
+
+// MongoDB operation (find or aggregate)
+operation := "find" // or "aggregate"
+
+// Query or pipeline
+query := bson.M{"field": "value"} // for find
+// OR
+pipeline := mongo.Pipeline{
+	{{"$match": bson.M{"field": "value"}}},
+	{{"$group": bson.M{"_id": "$field", "count": bson.M{"$sum": 1}}}},
+} // for aggregate
+
+Here's the database schema:
+%s
+
+Natural Language Query: %s
+
+Go Code:`, schemaDesc.String(), naturalQuery)
+	} else {
+		prompt = fmt.Sprintf(`You are an expert SQL query generator for %s databases.
 Given the following database schema and natural language query, generate a valid SQL query.
 Only return the SQL query without any explanation or markdown formatting.
 Only use SQL syntax and functions that are compatible with %s databases.
@@ -89,10 +120,11 @@ Do not use any database-specific functions or syntax that is not supported by %s
 Natural Language Query: %s
 
 SQL Query:`, db.Type, db.Type, db.Type, schemaDesc.String(), naturalQuery)
+	}
 
 	// Create request
 	request := OpenRouterRequest{
-		Model: "deepseek/deepseek-chat-v3-0324:free",
+		Model: "google/gemini-2.0-flash-exp:free",
 		Messages: []OpenRouterChatMessage{
 			{
 				Role:    "user",
@@ -148,15 +180,24 @@ SQL Query:`, db.Type, db.Type, db.Type, schemaDesc.String(), naturalQuery)
 		return "", fmt.Errorf("no response from the model")
 	}
 
-	// Get the generated SQL
-	generatedSQL := response.Choices[0].Message.Content
+	// Get the generated query
+	generatedQuery := response.Choices[0].Message.Content
 
-	// Clean up the SQL (remove any markdown formatting if present)
-	generatedSQL = strings.TrimSpace(generatedSQL)
-	generatedSQL = strings.TrimPrefix(generatedSQL, "```sql")
-	generatedSQL = strings.TrimPrefix(generatedSQL, "```")
-	generatedSQL = strings.TrimSuffix(generatedSQL, "```")
-	generatedSQL = strings.TrimSpace(generatedSQL)
+	// Clean up the query (remove any markdown formatting if present)
+	generatedQuery = strings.TrimSpace(generatedQuery)
+	if db.Type == "mongodb" {
+		generatedQuery = strings.TrimPrefix(generatedQuery, "```javascript")
+		generatedQuery = strings.TrimPrefix(generatedQuery, "```js")
+	} else {
+		generatedQuery = strings.TrimPrefix(generatedQuery, "```sql")
+	}
+	generatedQuery = strings.TrimPrefix(generatedQuery, "```")
+	generatedQuery = strings.TrimSuffix(generatedQuery, "```")
+	generatedQuery = strings.TrimSpace(generatedQuery)
 
-	return generatedSQL, nil
+	// Calculate and log the query generation time
+	generationTime := time.Since(startTime)
+	fmt.Printf("Query generation completed in %s\n", generationTime)
+
+	return generatedQuery, nil
 }

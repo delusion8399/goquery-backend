@@ -2,12 +2,9 @@ package models
 
 import (
 	"context"
-	"database/sql"
-	"encoding/json"
 	"fmt"
 	"time"
 
-	"github.com/lib/pq"
 	"github.com/zucced/goquery/database"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
@@ -176,111 +173,16 @@ func DeleteQuery(ctx context.Context, id primitive.ObjectID) error {
 	return err
 }
 
-// ExecuteQuery executes a SQL query against the specified database
-func ExecuteQuery(db *Database, sqlQuery string) ([]QueryResult, string, error) {
+// ExecuteQuery executes a query against the specified database
+func ExecuteQuery(db *Database, query string) ([]QueryResult, string, error) {
 	startTime := time.Now()
 
 	switch db.Type {
 	case "postgresql":
-		return executePostgresQuery(db, sqlQuery, startTime)
+		return executePostgresQuery(db, query, startTime)
+	case "mongodb":
+		return executeMongoDBQuery(db, query, startTime)
 	default:
 		return nil, "", fmt.Errorf("unsupported database type: %s", db.Type)
 	}
-}
-
-// executePostgresQuery executes a SQL query against a PostgreSQL database
-func executePostgresQuery(db *Database, sqlQuery string, startTime time.Time) ([]QueryResult, string, error) {
-	connStr := getPostgresConnectionString(db)
-
-	// Set a connection timeout
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	// Open connection with context
-	connector, err := pq.NewConnector(connStr)
-	if err != nil {
-		return nil, "", fmt.Errorf("failed to create connector: %v", err)
-	}
-
-	conn := sql.OpenDB(connector)
-	defer conn.Close()
-
-	// Test the connection
-	if err := conn.PingContext(ctx); err != nil {
-		return nil, "", fmt.Errorf("failed to ping database: %v", err)
-	}
-
-	// Execute the query
-	rows, err := conn.QueryContext(ctx, sqlQuery)
-	if err != nil {
-		return nil, "", fmt.Errorf("failed to execute query: %v", err)
-	}
-	defer rows.Close()
-
-	// Get column names
-	columns, err := rows.Columns()
-	if err != nil {
-		return nil, "", fmt.Errorf("failed to get column names: %v", err)
-	}
-
-	// Prepare result slice
-	var results []QueryResult
-
-	// Scan rows
-	for rows.Next() {
-		// Create a slice of interface{} to hold the values
-		values := make([]interface{}, len(columns))
-		valuePtrs := make([]interface{}, len(columns))
-
-		// Initialize the pointers
-		for i := range columns {
-			valuePtrs[i] = &values[i]
-		}
-
-		// Scan the row into the slice of pointers
-		if err := rows.Scan(valuePtrs...); err != nil {
-			return nil, "", fmt.Errorf("failed to scan row: %v", err)
-		}
-
-		// Create a map for this row
-		row := make(QueryResult)
-
-		// Convert each value to its appropriate type and add to the map
-		for i, col := range columns {
-			val := values[i]
-
-			// Handle nil values
-			if val == nil {
-				row[col] = nil
-				continue
-			}
-
-			// Handle different types
-			switch v := val.(type) {
-			case []byte:
-				// Try to unmarshal as JSON first
-				var jsonVal interface{}
-				if json.Unmarshal(v, &jsonVal) == nil {
-					row[col] = jsonVal
-				} else {
-					// If not JSON, use as string
-					row[col] = string(v)
-				}
-			default:
-				row[col] = v
-			}
-		}
-
-		results = append(results, row)
-	}
-
-	// Check for errors from iterating over rows
-	if err := rows.Err(); err != nil {
-		return nil, "", fmt.Errorf("error iterating over rows: %v", err)
-	}
-
-	// Calculate execution time
-	executionTime := time.Since(startTime).String()
-
-	return results, executionTime, nil
 }

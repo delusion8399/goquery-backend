@@ -75,16 +75,10 @@ func CreateQueryHandler(cfg *config.Config) fiber.Handler {
 			Status:       models.QueryStatusRunning,
 		}
 
-		// If name is not provided, generate one using LLM
+		// If name is not provided, use a default name initially
 		if req.Name == "" {
-			generatedName, err := ai.GenerateQueryTitle(req.Query, cfg)
-			if err != nil {
-				// Just log the error but continue with the query
-				fmt.Printf("Failed to generate query title: %v\n", err)
-				query.Name = "Database Query"
-			} else {
-				query.Name = generatedName
-			}
+			// Use a default name for now
+			query.Name = "Query"
 		} else {
 			query.Name = req.Name
 		}
@@ -97,12 +91,13 @@ func CreateQueryHandler(cfg *config.Config) fiber.Handler {
 			})
 		}
 
-		// Generate SQL using OpenRouter Gemini
-		generatedSQL, err := ai.GenerateSQL(req.Query, db, cfg)
+		// Generate query using OpenRouter Gemini based on database type
+		fmt.Printf("[%s] Starting query generation for database type: %s\n", time.Now().Format(time.RFC3339), db.Type)
+		generatedQuery, err := ai.GenerateSQL(req.Query, db, cfg)
 		if err != nil {
 			// Update query with error
 			query.Status = models.QueryStatusFailed
-			query.Error = "Failed to generate SQL: " + err.Error()
+			query.Error = "Failed to generate query: " + err.Error()
 			models.UpdateQuery(ctx, query)
 
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
@@ -111,11 +106,15 @@ func CreateQueryHandler(cfg *config.Config) fiber.Handler {
 			})
 		}
 
-		// Update query with generated SQL
-		query.GeneratedSQL = generatedSQL
+		// Update query with generated query
+		query.GeneratedSQL = generatedQuery
+		fmt.Printf("Generated query: %s\n", generatedQuery)
 
-		// Execute the query
-		results, executionTime, err := models.ExecuteQuery(db, generatedSQL)
+		// Execute the query based on database type
+		fmt.Printf("[%s] Starting query execution\n", time.Now().Format(time.RFC3339))
+		executionStartTime := time.Now()
+		results, executionTime, err := models.ExecuteQuery(db, generatedQuery)
+		fmt.Printf("[%s] Query execution completed in %s\n", time.Now().Format(time.RFC3339), time.Since(executionStartTime))
 		if err != nil {
 			// Update query with error
 			query.Status = models.QueryStatusFailed
@@ -132,6 +131,7 @@ func CreateQueryHandler(cfg *config.Config) fiber.Handler {
 		query.Status = models.QueryStatusCompleted
 		query.Results = results
 		query.ExecutionTime = executionTime
+		query.Error = "" // Clear any previous errors
 
 		// Save updated query
 		err = models.UpdateQuery(ctx, query)
@@ -139,6 +139,41 @@ func CreateQueryHandler(cfg *config.Config) fiber.Handler {
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 				"error": "Failed to update query: " + err.Error(),
 			})
+		}
+
+		// Generate title in the background if a custom name wasn't provided
+		if req.Name == "" {
+			// Create a copy of the context with a longer timeout for the background process
+			bgCtx, bgCancel := context.WithTimeout(context.Background(), 30*time.Second)
+
+			// Generate title in a goroutine
+			go func(bgCtx context.Context, bgCancel context.CancelFunc, query *models.Query) {
+				defer bgCancel() // Ensure context is canceled when goroutine completes
+
+				// Generate a title using the AI
+				fmt.Printf("[%s] Generating title for query in background\n", time.Now().Format(time.RFC3339))
+				titleStartTime := time.Now()
+
+				generatedName, err := ai.GenerateQueryTitle(query.NaturalQuery, cfg)
+				if err != nil {
+					fmt.Printf("[%s] Failed to generate query title: %v\n", time.Now().Format(time.RFC3339), err)
+					// Keep the default name
+					return
+				}
+
+				// Update the query with the generated title
+				query.Name = generatedName
+				err = models.UpdateQuery(bgCtx, query)
+				if err != nil {
+					fmt.Printf("[%s] Failed to update query with generated title: %v\n", time.Now().Format(time.RFC3339), err)
+					return
+				}
+
+				fmt.Printf("[%s] Title generation completed in %s: %s\n",
+					time.Now().Format(time.RFC3339),
+					time.Since(titleStartTime),
+					generatedName)
+			}(bgCtx, bgCancel, query)
 		}
 
 		// Return response

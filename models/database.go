@@ -2,12 +2,9 @@ package models
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
-	"log"
 	"time"
 
-	"github.com/lib/pq" // PostgreSQL driver
 	"github.com/zucced/goquery/database"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
@@ -154,42 +151,13 @@ func UpdateLastConnected(ctx context.Context, id primitive.ObjectID) error {
 	return err
 }
 
-// getPostgresConnectionString returns a connection string for PostgreSQL
-func getPostgresConnectionString(db *Database) string {
-	sslMode := "disable"
-	if db.SSL {
-		sslMode = "require"
-	}
-
-	return fmt.Sprintf(
-		"host=%s port=%s user=%s password=%s dbname=%s sslmode=%s",
-		db.Host,
-		db.Port,
-		db.Username,
-		db.Password,
-		db.DatabaseName,
-		sslMode,
-	)
-}
-
 // TestConnection tests the connection to the database
 func TestConnection(db *Database) error {
 	switch db.Type {
 	case "postgresql":
-		connStr := getPostgresConnectionString(db)
-		conn, err := sql.Open("postgres", connStr)
-		if err != nil {
-			return fmt.Errorf("failed to open connection: %v", err)
-		}
-		defer conn.Close()
-
-		// Test the connection
-		err = conn.Ping()
-		if err != nil {
-			return fmt.Errorf("failed to connect to database: %v", err)
-		}
-
-		return nil
+		return testPostgresConnection(db)
+	case "mongodb":
+		return testMongoDBConnection(db)
 	default:
 		return fmt.Errorf("unsupported database type: %s", db.Type)
 	}
@@ -200,118 +168,11 @@ func FetchDatabaseSchema(db *Database) (*Schema, error) {
 	switch db.Type {
 	case "postgresql":
 		return fetchPostgresSchema(db)
+	case "mongodb":
+		return fetchMongoDBSchema(db)
 	default:
-		return nil, fmt.Errorf("unsupported database type: %s", db.Type)
+		return &Schema{Tables: []Table{}}, fmt.Errorf("unsupported database type: %s", db.Type)
 	}
-}
-
-// fetchPostgresSchema fetches the schema of a PostgreSQL database
-func fetchPostgresSchema(db *Database) (*Schema, error) {
-	connStr := getPostgresConnectionString(db)
-
-	// Set a connection timeout
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	// Open connection with context
-	connector, err := pq.NewConnector(connStr)
-	if err != nil {
-		return &Schema{Tables: []Table{}}, fmt.Errorf("failed to create connector: %v", err)
-	}
-
-	conn := sql.OpenDB(connector)
-	defer conn.Close()
-
-	// Test the connection
-	if err := conn.PingContext(ctx); err != nil {
-		return &Schema{Tables: []Table{}}, fmt.Errorf("failed to ping database: %v", err)
-	}
-
-	// Get all tables in the database with timeout
-	rows, err := conn.QueryContext(ctx, `
-		SELECT table_name
-		FROM information_schema.tables
-		WHERE table_schema = 'public'
-		LIMIT 100 -- Limit to prevent timeout on large databases
-	`)
-
-	if err != nil {
-		return &Schema{Tables: []Table{}}, fmt.Errorf("failed to query tables: %v", err)
-	}
-	defer rows.Close()
-
-	var tables []Table
-	for rows.Next() {
-		var tableName string
-		if err := rows.Scan(&tableName); err != nil {
-			return &Schema{Tables: []Table{}}, fmt.Errorf("failed to scan table name: %v", err)
-		}
-
-		// Get columns for this table
-		columns, err := fetchPostgresColumns(conn, tableName, ctx)
-		if err != nil {
-			// Log the error but continue with other tables
-			log.Printf("Error fetching columns for table %s: %v", tableName, err)
-			continue
-		}
-
-		tables = append(tables, Table{
-			Name:    tableName,
-			Columns: columns,
-		})
-	}
-
-	// Always return a valid schema with at least an empty tables array
-	return &Schema{Tables: tables}, nil
-}
-
-// fetchPostgresColumns fetches the columns of a PostgreSQL table
-func fetchPostgresColumns(db *sql.DB, tableName string, ctx context.Context) ([]Column, error) {
-	// Query to get column information including primary key status
-	query := `
-		SELECT
-			c.column_name,
-			c.data_type,
-			c.is_nullable = 'YES' as is_nullable,
-			pg_constraint.contype = 'p' as is_primary_key
-		FROM
-			information_schema.columns c
-		LEFT JOIN
-			information_schema.key_column_usage kcu
-			ON c.table_name = kcu.table_name AND c.column_name = kcu.column_name
-		LEFT JOIN
-			pg_constraint
-			ON kcu.constraint_name = pg_constraint.conname
-		WHERE
-			c.table_name = $1
-		ORDER BY
-			c.ordinal_position
-	`
-
-	rows, err := db.QueryContext(ctx, query, tableName)
-	if err != nil {
-		return nil, fmt.Errorf("failed to query columns: %v", err)
-	}
-	defer rows.Close()
-
-	var columns []Column
-	for rows.Next() {
-		var column Column
-		var isNullable bool
-		var isPrimaryKey sql.NullBool // Use sql.NullBool to handle NULL values
-
-		if err := rows.Scan(&column.Name, &column.Type, &isNullable, &isPrimaryKey); err != nil {
-			return nil, fmt.Errorf("failed to scan column: %v", err)
-		}
-
-		column.Nullable = isNullable
-		// Only set PrimaryKey to true if the value is valid and true
-		column.PrimaryKey = isPrimaryKey.Valid && isPrimaryKey.Bool
-
-		columns = append(columns, column)
-	}
-
-	return columns, nil
 }
 
 // FetchDatabaseStats fetches statistics about the database
@@ -319,61 +180,11 @@ func FetchDatabaseStats(db *Database) (*DatabaseStats, error) {
 	switch db.Type {
 	case "postgresql":
 		return fetchPostgresStats(db)
+	case "mongodb":
+		return fetchMongoDBStats(db)
 	default:
-		return nil, fmt.Errorf("unsupported database type: %s", db.Type)
+		return &DatabaseStats{TableCount: 0, Size: "Unknown"}, fmt.Errorf("unsupported database type: %s", db.Type)
 	}
-}
-
-// fetchPostgresStats fetches statistics about a PostgreSQL database
-func fetchPostgresStats(db *Database) (*DatabaseStats, error) {
-	connStr := getPostgresConnectionString(db)
-
-	// Set a connection timeout
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	// Open connection with context
-	connector, err := pq.NewConnector(connStr)
-	if err != nil {
-		return &DatabaseStats{TableCount: 0, Size: "Unknown"}, fmt.Errorf("failed to create connector: %v", err)
-	}
-
-	conn := sql.OpenDB(connector)
-	defer conn.Close()
-
-	// Test the connection
-	if err := conn.PingContext(ctx); err != nil {
-		return &DatabaseStats{TableCount: 0, Size: "Unknown"}, fmt.Errorf("failed to ping database: %v", err)
-	}
-
-	// Get table count
-	var tableCount int
-	err = conn.QueryRowContext(ctx, `
-		SELECT COUNT(*)
-		FROM information_schema.tables
-		WHERE table_schema = 'public'
-	`).Scan(&tableCount)
-	if err != nil {
-		return &DatabaseStats{TableCount: 0, Size: "Unknown"}, fmt.Errorf("failed to get table count: %v", err)
-	}
-
-	// Get database size
-	var sizeBytes int64
-	err = conn.QueryRowContext(ctx, `
-		SELECT pg_database_size($1)
-	`, db.DatabaseName).Scan(&sizeBytes)
-	if err != nil {
-		// If we can't get the size, at least return the table count
-		return &DatabaseStats{TableCount: tableCount, Size: "Unknown"}, fmt.Errorf("failed to get database size: %v", err)
-	}
-
-	// Convert size to human-readable format
-	size := formatSize(sizeBytes)
-
-	return &DatabaseStats{
-		TableCount: tableCount,
-		Size:       size,
-	}, nil
 }
 
 // formatSize converts bytes to a human-readable format

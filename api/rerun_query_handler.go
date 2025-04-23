@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/gofiber/fiber/v2"
@@ -65,16 +66,29 @@ func RerunQueryHandler() fiber.Handler {
 		// Update query status
 		query.Status = models.QueryStatusRunning
 		query.UpdatedAt = time.Now()
-		models.UpdateQuery(ctx, query)
+		query.Error = "" // Clear any previous errors
+		err = models.UpdateQuery(ctx, query)
+		if err != nil {
+			fmt.Printf("Failed to update query status to running: %v\n", err)
+			// Continue anyway
+		}
 
-		// Execute the query
+		// Log the query execution
+		fmt.Printf("[%s] Rerunning query for database type: %s\n", time.Now().Format(time.RFC3339), db.Type)
+		fmt.Printf("Query: %s\n", query.GeneratedSQL)
+
+		// Execute the query based on database type
+		fmt.Printf("[%s] Starting query execution\n", time.Now().Format(time.RFC3339))
+		executionStartTime := time.Now()
 		results, executionTime, err := models.ExecuteQuery(db, query.GeneratedSQL)
+		fmt.Printf("[%s] Query execution completed in %s\n", time.Now().Format(time.RFC3339), time.Since(executionStartTime))
 		if err != nil {
 			// Update query with error
 			query.Status = models.QueryStatusFailed
 			query.Error = "Failed to execute query: " + err.Error()
 			models.UpdateQuery(ctx, query)
 
+			fmt.Printf("Query execution failed: %v\n", err)
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 				"error": query.Error,
 				"query": query,
