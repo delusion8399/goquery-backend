@@ -14,7 +14,7 @@ import (
 )
 
 const (
-	OpenRouterBaseURL = "https://openrouter.ai/api/v1/chat/completions"
+	OpenRouterBaseURL = "https://api.deepseek.com/chat/completions"
 )
 
 // OpenRouterRequest represents a request to the OpenRouter API
@@ -124,7 +124,7 @@ SQL Query:`, db.Type, db.Type, db.Type, schemaDesc.String(), naturalQuery)
 
 	// Create request
 	request := OpenRouterRequest{
-		Model: "google/gemini-2.0-flash-exp:free",
+		Model: "deepseek-chat",
 		Messages: []OpenRouterChatMessage{
 			{
 				Role:    "user",
@@ -148,7 +148,6 @@ SQL Query:`, db.Type, db.Type, db.Type, schemaDesc.String(), naturalQuery)
 	// Set headers
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+apiKey)
-	req.Header.Set("HTTP-Referer", "https://goquery.io") // Replace with your actual domain
 
 	// Send request
 	client := &http.Client{}
@@ -160,6 +159,7 @@ SQL Query:`, db.Type, db.Type, db.Type, schemaDesc.String(), naturalQuery)
 
 	// Read response
 	body, err := io.ReadAll(resp.Body)
+
 	if err != nil {
 		return "", fmt.Errorf("failed to read response: %v", err)
 	}

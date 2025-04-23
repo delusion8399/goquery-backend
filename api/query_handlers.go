@@ -142,39 +142,39 @@ func CreateQueryHandler(cfg *config.Config) fiber.Handler {
 		}
 
 		// Generate title in the background if a custom name wasn't provided
-		if req.Name == "" {
-			// Create a copy of the context with a longer timeout for the background process
-			bgCtx, bgCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		// if req.Name == "" {
+		// 	// Create a copy of the context with a longer timeout for the background process
+		// 	bgCtx, bgCancel := context.WithTimeout(context.Background(), 30*time.Second)
 
-			// Generate title in a goroutine
-			go func(bgCtx context.Context, bgCancel context.CancelFunc, query *models.Query) {
-				defer bgCancel() // Ensure context is canceled when goroutine completes
+		// 	// Generate title in a goroutine
+		// 	go func(bgCtx context.Context, bgCancel context.CancelFunc, query *models.Query) {
+		// 		defer bgCancel() // Ensure context is canceled when goroutine completes
 
-				// Generate a title using the AI
-				fmt.Printf("[%s] Generating title for query in background\n", time.Now().Format(time.RFC3339))
-				titleStartTime := time.Now()
+		// 		// Generate a title using the AI
+		// 		fmt.Printf("[%s] Generating title for query in background\n", time.Now().Format(time.RFC3339))
+		// 		titleStartTime := time.Now()
 
-				generatedName, err := ai.GenerateQueryTitle(query.NaturalQuery, cfg)
-				if err != nil {
-					fmt.Printf("[%s] Failed to generate query title: %v\n", time.Now().Format(time.RFC3339), err)
-					// Keep the default name
-					return
-				}
+		// 		generatedName, err := ai.GenerateQueryTitle(query.NaturalQuery, cfg)
+		// 		if err != nil {
+		// 			fmt.Printf("[%s] Failed to generate query title: %v\n", time.Now().Format(time.RFC3339), err)
+		// 			// Keep the default name
+		// 			return
+		// 		}
 
-				// Update the query with the generated title
-				query.Name = generatedName
-				err = models.UpdateQuery(bgCtx, query)
-				if err != nil {
-					fmt.Printf("[%s] Failed to update query with generated title: %v\n", time.Now().Format(time.RFC3339), err)
-					return
-				}
+		// 		// Update the query with the generated title
+		// 		query.Name = generatedName
+		// 		err = models.UpdateQuery(bgCtx, query)
+		// 		if err != nil {
+		// 			fmt.Printf("[%s] Failed to update query with generated title: %v\n", time.Now().Format(time.RFC3339), err)
+		// 			return
+		// 		}
 
-				fmt.Printf("[%s] Title generation completed in %s: %s\n",
-					time.Now().Format(time.RFC3339),
-					time.Since(titleStartTime),
-					generatedName)
-			}(bgCtx, bgCancel, query)
-		}
+		// 		fmt.Printf("[%s] Title generation completed in %s: %s\n",
+		// 			time.Now().Format(time.RFC3339),
+		// 			time.Since(titleStartTime),
+		// 			generatedName)
+		// 	}(bgCtx, bgCancel, query)
+		// }
 
 		// Return response
 		return c.JSON(query)
