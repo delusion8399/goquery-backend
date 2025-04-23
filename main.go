@@ -80,8 +80,22 @@ func setupRoutes(app *fiber.App, cfg *config.Config) {
 	queries.Post("", api.CreateQueryHandler(cfg))
 	queries.Get("", api.GetQueriesHandler())
 	queries.Get("/:id", api.GetQueryHandler())
-	queries.Put("/:id", api.UpdateQueryHandler()) // Add the update endpoint
+	queries.Put("/:id", api.UpdateQueryHandler())
 	queries.Delete("/:id", api.DeleteQueryHandler())
+	queries.Post("/:id/rerun", api.RerunQueryHandler())
+	queries.Post("/:id/rerun", api.RerunQueryHandler())
+
+	// Dashboard routes (protected)
+	dashboards := apiGroup.Group("/dashboards", middleware.AuthMiddleware(cfg))
+	dashboards.Post("", api.CreateDashboardHandler())
+	dashboards.Get("", api.GetDashboardsHandler())
+	dashboards.Get("/:id", api.GetDashboardHandler())
+	dashboards.Put("/:id", api.UpdateDashboardHandler())
+	dashboards.Delete("/:id", api.DeleteDashboardHandler())
+	dashboards.Post("/:id/cards", api.AddCardHandler())
+	dashboards.Put("/:id/cards/:cardId", api.UpdateCardHandler())
+	dashboards.Delete("/:id/cards/:cardId", api.DeleteCardHandler())
+	dashboards.Put("/:id/cards", api.UpdateCardPositionsHandler())
 
 	// Health check
 	app.Get("/health", func(c *fiber.Ctx) error {

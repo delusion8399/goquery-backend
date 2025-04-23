@@ -235,7 +235,6 @@ func fetchPostgresSchema(db *Database) (*Schema, error) {
 		LIMIT 100 -- Limit to prevent timeout on large databases
 	`)
 
-	fmt.Println(rows)
 	if err != nil {
 		return &Schema{Tables: []Table{}}, fmt.Errorf("failed to query tables: %v", err)
 	}

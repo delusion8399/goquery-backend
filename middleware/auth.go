@@ -39,7 +39,7 @@ func AuthMiddleware(cfg *config.Config) fiber.Handler {
 		tokenString := parts[1]
 
 		// Parse the token
-		token, err := jwt.ParseWithClaims(tokenString, &TokenClaims{}, func(token *jwt.Token) (interface{}, error) {
+		token, err := jwt.ParseWithClaims(tokenString, &TokenClaims{}, func(token *jwt.Token) (any, error) {
 			return []byte(cfg.JWTSecret), nil
 		})
 

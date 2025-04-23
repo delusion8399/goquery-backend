@@ -92,7 +92,7 @@ SQL Query:`, db.Type, db.Type, db.Type, schemaDesc.String(), naturalQuery)
 
 	// Create request
 	request := OpenRouterRequest{
-		Model: "google/gemini-pro", // Using Gemini Pro model
+		Model: "deepseek/deepseek-chat-v3-0324:free",
 		Messages: []OpenRouterChatMessage{
 			{
 				Role:    "user",
@@ -100,8 +100,6 @@ SQL Query:`, db.Type, db.Type, db.Type, schemaDesc.String(), naturalQuery)
 			},
 		},
 	}
-
-	fmt.Println(prompt)
 
 	// Convert request to JSON
 	requestBody, err := json.Marshal(request)
