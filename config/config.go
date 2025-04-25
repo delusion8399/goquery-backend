@@ -10,14 +10,16 @@ import (
 
 // Config holds all configuration for the application
 type Config struct {
-	AppPort          int
-	AppEnv           string
-	MongoURI         string
-	MongoDatabase    string
-	JWTSecret        string
-	JWTExpiry        time.Duration
-	AllowOrigins     string
-	OpenRouterAPIKey string
+	AppPort           int
+	AppEnv            string
+	MongoURI          string
+	MongoDatabase     string
+	JWTSecret         string
+	JWTExpiry         time.Duration
+	AllowOrigins      string
+	OpenRouterAPIKey  string
+	OpenRouterModel   string
+	OpenRouterBaseURL string
 }
 
 // LoadConfig loads configuration from environment variables
@@ -71,6 +73,20 @@ func LoadConfig() (*Config, error) {
 
 	if apiKey := os.Getenv("OPENROUTER_API_KEY"); apiKey != "" {
 		config.OpenRouterAPIKey = apiKey
+	}
+
+	if model := os.Getenv("OPENROUTER_MODEL"); model != "" {
+		config.OpenRouterModel = model
+	} else {
+		// Default model if not specified
+		config.OpenRouterModel = "deepseek-chat"
+	}
+
+	if baseURL := os.Getenv("OPENROUTER_BASE_URL"); baseURL != "" {
+		config.OpenRouterBaseURL = baseURL
+	} else {
+		// Default base URL if not specified
+		config.OpenRouterBaseURL = "https://api.deepseek.com/chat/completions"
 	}
 
 	return config, nil

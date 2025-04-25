@@ -13,9 +13,7 @@ import (
 	"github.com/zucced/goquery/models"
 )
 
-const (
-	OpenRouterBaseURL = "https://api.deepseek.com/chat/completions"
-)
+// OpenRouter API functions
 
 // addNestedFields recursively adds nested fields to the schema description
 func addNestedFields(builder *strings.Builder, fields []models.Column, indent int) {
@@ -101,8 +99,13 @@ Natural Language Query: %s
 
 Most Relevant Table/Collection:`, tableNames.String(), naturalQuery)
 
+	modelName := cfg.OpenRouterModel
+	if modelName == "" {
+		modelName = "deepseek-chat"
+	}
+
 	request := OpenRouterRequest{
-		Model: "deepseek-chat",
+		Model: modelName,
 		Messages: []OpenRouterChatMessage{
 			{
 				Role:    "user",
@@ -116,7 +119,13 @@ Most Relevant Table/Collection:`, tableNames.String(), naturalQuery)
 		return "", fmt.Errorf("failed to marshal request: %v", err)
 	}
 
-	req, err := http.NewRequest("POST", OpenRouterBaseURL, bytes.NewBuffer(requestBody))
+	// Use base URL from config or fallback to default
+	baseURL := cfg.OpenRouterBaseURL
+	if baseURL == "" {
+		baseURL = "https://api.deepseek.com/chat/completions"
+	}
+
+	req, err := http.NewRequest("POST", baseURL, bytes.NewBuffer(requestBody))
 	if err != nil {
 		return "", fmt.Errorf("failed to create request: %v", err)
 	}
@@ -132,6 +141,9 @@ Most Relevant Table/Collection:`, tableNames.String(), naturalQuery)
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(resp.Body)
+
+	fmt.Println("Response body:", string(body))
+
 	if err != nil {
 		return "", fmt.Errorf("failed to read response: %v", err)
 	}
@@ -275,8 +287,14 @@ Natural Language Query: %s
 SQL Query:`, db.Type, db.Type, db.Type, schemaDesc.String(), naturalQuery)
 	}
 
+	// Use model from config or fallback to default
+	modelName := cfg.OpenRouterModel
+	if modelName == "" {
+		modelName = "deepseek-chat"
+	}
+
 	request := OpenRouterRequest{
-		Model: "deepseek-chat",
+		Model: modelName,
 		Messages: []OpenRouterChatMessage{
 			{
 				Role:    "user",
@@ -290,7 +308,13 @@ SQL Query:`, db.Type, db.Type, db.Type, schemaDesc.String(), naturalQuery)
 		return "", fmt.Errorf("failed to marshal request: %v", err)
 	}
 
-	req, err := http.NewRequest("POST", OpenRouterBaseURL, bytes.NewBuffer(requestBody))
+	// Use base URL from config or fallback to default
+	baseURL := cfg.OpenRouterBaseURL
+	if baseURL == "" {
+		baseURL = "https://api.deepseek.com/chat/completions"
+	}
+
+	req, err := http.NewRequest("POST", baseURL, bytes.NewBuffer(requestBody))
 	if err != nil {
 		return "", fmt.Errorf("failed to create request: %v", err)
 	}

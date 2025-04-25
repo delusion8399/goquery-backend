@@ -45,8 +45,14 @@ Title:`, naturalQuery)
 		return "", fmt.Errorf("failed to marshal request: %v", err)
 	}
 
+	// Use base URL from config or fallback to default
+	baseURL := cfg.OpenRouterBaseURL
+	if baseURL == "" {
+		baseURL = "https://api.deepseek.com/chat/completions"
+	}
+
 	// Create HTTP request
-	req, err := http.NewRequest("POST", OpenRouterBaseURL, bytes.NewBuffer(requestBody))
+	req, err := http.NewRequest("POST", baseURL, bytes.NewBuffer(requestBody))
 	if err != nil {
 		return "", fmt.Errorf("failed to create request: %v", err)
 	}
