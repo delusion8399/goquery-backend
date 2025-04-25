@@ -22,7 +22,7 @@ func main() {
 		log.Fatalf("Failed to load configuration: %v", err)
 	}
 
-	fmt.Println(cfg, "sad")
+	fmt.Println("Loaded config: ", cfg)
 
 	// Connect to MongoDB
 	if err := database.ConnectDB(cfg); err != nil {
@@ -82,7 +82,6 @@ func setupRoutes(app *fiber.App, cfg *config.Config) {
 	queries.Get("/:id", api.GetQueryHandler())
 	queries.Put("/:id", api.UpdateQueryHandler())
 	queries.Delete("/:id", api.DeleteQueryHandler())
-	queries.Post("/:id/rerun", api.RerunQueryHandler())
 	queries.Post("/:id/rerun", api.RerunQueryHandler())
 
 	// Dashboard routes (protected)

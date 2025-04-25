@@ -13,10 +13,12 @@ import (
 
 // Column represents a database column
 type Column struct {
-	Name       string `json:"name" bson:"name"`
-	Type       string `json:"type" bson:"type"`
-	Nullable   bool   `json:"nullable" bson:"nullable"`
-	PrimaryKey bool   `json:"primary_key" bson:"primary_key"`
+	Name       string   `json:"name" bson:"name"`
+	Type       string   `json:"type" bson:"type"`
+	Nullable   bool     `json:"nullable" bson:"nullable"`
+	PrimaryKey bool     `json:"primary_key" bson:"primary_key"`
+	Fields     []Column `json:"fields,omitempty" bson:"fields,omitempty"` // For nested fields in MongoDB
+	Path       string   `json:"path,omitempty" bson:"path,omitempty"`     // Full path for nested fields
 }
 
 // Table represents a database table
@@ -48,6 +50,7 @@ type Database struct {
 	Password      string             `json:"-" bson:"password"`
 	DatabaseName  string             `json:"database_name" bson:"database_name"`
 	SSL           bool               `json:"ssl" bson:"ssl"`
+	ConnectionURI string             `json:"connection_uri,omitempty" bson:"connection_uri,omitempty"`
 	Schema        *Schema            `json:"schema,omitempty" bson:"schema,omitempty"`
 	Stats         *DatabaseStats     `json:"stats,omitempty" bson:"stats,omitempty"`
 	CreatedAt     time.Time          `json:"created_at" bson:"created_at"`
@@ -124,6 +127,9 @@ func UpdateDatabase(ctx context.Context, db *Database) error {
 			"password":       db.Password,
 			"database_name":  db.DatabaseName,
 			"ssl":            db.SSL,
+			"connection_uri": db.ConnectionURI,
+			"schema":         db.Schema,
+			"stats":          db.Stats,
 			"updated_at":     db.UpdatedAt,
 			"last_connected": db.LastConnected,
 		}},

@@ -93,7 +93,20 @@ func CreateQueryHandler(cfg *config.Config) fiber.Handler {
 
 		// Generate query using OpenRouter Gemini based on database type
 		fmt.Printf("[%s] Starting query generation for database type: %s\n", time.Now().Format(time.RFC3339), db.Type)
-		generatedQuery, err := ai.GenerateSQL(req.Query, db, cfg)
+
+		// First find the matching table to save tokens
+		fmt.Printf("[%s] Finding matching table for query\n", time.Now().Format(time.RFC3339))
+		matchingTable, err := ai.FindMatchingSchemaTable(req.Query, db, cfg)
+		if err != nil {
+			fmt.Printf("[%s] Error finding matching table: %v, falling back to full schema\n", time.Now().Format(time.RFC3339), err)
+			// If we can't find a matching table, use the full schema
+			matchingTable = ""
+		} else {
+			fmt.Printf("[%s] Found matching table: %s\n", time.Now().Format(time.RFC3339), matchingTable)
+		}
+
+		// Generate the query using only the matching table's schema
+		generatedQuery, err := ai.GenerateSQL(req.Query, db, cfg, matchingTable)
 		if err != nil {
 			// Update query with error
 			query.Status = models.QueryStatusFailed

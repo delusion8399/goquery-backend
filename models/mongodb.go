@@ -6,10 +6,12 @@ import (
 	"log"
 	"math"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
 	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 	"go.mongodb.org/mongo-driver/mongo/readpref"
@@ -17,7 +19,10 @@ import (
 
 // getMongoDBConnectionString returns a connection string for MongoDB
 func getMongoDBConnectionString(db *Database) string {
-	// Build the connection string
+	if db.Type == "mongodb" && db.ConnectionURI != "" {
+		return db.ConnectionURI
+	}
+
 	connStr := fmt.Sprintf("mongodb+srv://%s:%s@%s/%s",
 		db.Username,
 		db.Password,
@@ -25,38 +30,28 @@ func getMongoDBConnectionString(db *Database) string {
 		db.DatabaseName,
 	)
 
-	// Add SSL if enabled
 	if db.SSL {
 		connStr += "?ssl=true"
 	}
 
 	connStr += "&retryWrites=true&w=majority"
-
 	return connStr
 }
 
 // testMongoDBConnection tests the connection to a MongoDB database
 func testMongoDBConnection(db *Database) error {
-	// Create a context with timeout
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 
-	// Get connection string
 	connStr := getMongoDBConnectionString(db)
-
-	fmt.Println(connStr)
-
-	// Create client options
 	clientOptions := options.Client().ApplyURI(connStr)
 
-	// Connect to MongoDB
 	client, err := mongo.Connect(ctx, clientOptions)
 	if err != nil {
 		return fmt.Errorf("failed to create MongoDB client: %v", err)
 	}
 	defer client.Disconnect(ctx)
 
-	// Ping the database
 	err = client.Ping(ctx, readpref.Primary())
 	if err != nil {
 		return fmt.Errorf("failed to connect to MongoDB: %v", err)
@@ -67,59 +62,56 @@ func testMongoDBConnection(db *Database) error {
 
 // fetchMongoDBSchema fetches the schema of a MongoDB database
 func fetchMongoDBSchema(db *Database) (*Schema, error) {
-	// Create a context with timeout
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 
-	// Get connection string
 	connStr := getMongoDBConnectionString(db)
-
-	// Create client options
 	clientOptions := options.Client().ApplyURI(connStr)
 
-	// Connect to MongoDB
 	client, err := mongo.Connect(ctx, clientOptions)
 	if err != nil {
 		return &Schema{Tables: []Table{}}, fmt.Errorf("failed to create MongoDB client: %v", err)
 	}
 	defer client.Disconnect(ctx)
 
-	// Ping the database
 	err = client.Ping(ctx, readpref.Primary())
 	if err != nil {
 		return &Schema{Tables: []Table{}}, fmt.Errorf("failed to connect to MongoDB: %v", err)
 	}
 
-	// Get database
-	database := client.Database(db.DatabaseName)
+	var dbName string
+	if db.ConnectionURI != "" {
+		parts := strings.Split(db.ConnectionURI, "/")
+		if len(parts) > 3 {
+			dbNameParts := strings.Split(parts[len(parts)-1], "?")
+			dbName = dbNameParts[0]
+		}
+	}
 
-	// Get collections (equivalent to tables in SQL)
+	if dbName == "" {
+		dbName = db.DatabaseName
+	}
+
+	database := client.Database(dbName)
 	collections, err := database.ListCollectionNames(ctx, bson.M{})
 	if err != nil {
 		return &Schema{Tables: []Table{}}, fmt.Errorf("failed to list collections: %v", err)
 	}
 
-	// Create tables array
 	var tables []Table
 	for _, collName := range collections {
-		// Skip system collections
 		if strings.HasPrefix(collName, "system.") {
 			continue
 		}
 
-		// Get sample document to infer schema
 		coll := database.Collection(collName)
 		var doc bson.M
 		err := coll.FindOne(ctx, bson.M{}).Decode(&doc)
 
-		// If collection is empty, continue with empty columns
 		columns := []Column{}
-
 		if err == nil {
-			// Extract fields from document
 			columns = inferMongoDBColumns(doc)
 		} else if err != mongo.ErrNoDocuments {
-			// Log error but continue with other collections
 			log.Printf("Error fetching sample document for collection %s: %v", collName, err)
 		}
 
@@ -134,23 +126,35 @@ func fetchMongoDBSchema(db *Database) (*Schema, error) {
 
 // inferMongoDBColumns infers columns from a MongoDB document
 func inferMongoDBColumns(doc bson.M) []Column {
+	return inferMongoDBColumnsWithPath(doc, "")
+}
+
+// inferMongoDBColumnsWithPath infers columns from a MongoDB document with path tracking
+func inferMongoDBColumnsWithPath(doc bson.M, parentPath string) []Column {
 	var columns []Column
 
 	for key, value := range doc {
-		// Skip _id field
+		// Build the full path for this field
+		path := key
+		if parentPath != "" {
+			path = parentPath + "." + key
+		}
+
 		if key == "_id" {
 			columns = append(columns, Column{
 				Name:       "_id",
 				Type:       "ObjectID",
 				Nullable:   false,
 				PrimaryKey: true,
+				Path:       path,
 			})
 			continue
 		}
 
-		// Determine type
 		dataType := "unknown"
-		switch value.(type) {
+		var fields []Column
+
+		switch v := value.(type) {
 		case string:
 			dataType = "string"
 		case int, int32, int64:
@@ -161,12 +165,45 @@ func inferMongoDBColumns(doc bson.M) []Column {
 			dataType = "boolean"
 		case time.Time:
 			dataType = "date"
+		case primitive.DateTime:
+			dataType = "date"
+		case primitive.ObjectID:
+			dataType = "ObjectID"
 		case bson.A:
 			dataType = "array"
+			// Process array elements if not empty
+			if len(v) > 0 {
+				// For arrays, we'll try to infer the schema from the first element
+				if firstElem, ok := v[0].(bson.M); ok {
+					fields = inferMongoDBColumnsWithPath(firstElem, path)
+				} else if firstElem, ok := v[0].(bson.D); ok {
+					// Convert bson.D to bson.M
+					m := bson.M{}
+					for _, e := range firstElem {
+						m[e.Key] = e.Value
+					}
+					fields = inferMongoDBColumnsWithPath(m, path)
+				}
+			}
 		case bson.M:
 			dataType = "object"
+			fields = inferMongoDBColumnsWithPath(v, path)
 		case bson.D:
 			dataType = "object"
+			// Convert bson.D to bson.M
+			m := bson.M{}
+			for _, e := range v {
+				m[e.Key] = e.Value
+			}
+			fields = inferMongoDBColumnsWithPath(m, path)
+		case map[string]interface{}:
+			dataType = "object"
+			// Convert map to bson.M
+			m := bson.M{}
+			for k, val := range v {
+				m[k] = val
+			}
+			fields = inferMongoDBColumnsWithPath(m, path)
 		case nil:
 			dataType = "null"
 		}
@@ -176,6 +213,8 @@ func inferMongoDBColumns(doc bson.M) []Column {
 			Type:       dataType,
 			Nullable:   true,
 			PrimaryKey: false,
+			Fields:     fields,
+			Path:       path,
 		})
 	}
 
@@ -184,39 +223,42 @@ func inferMongoDBColumns(doc bson.M) []Column {
 
 // fetchMongoDBStats fetches statistics about a MongoDB database
 func fetchMongoDBStats(db *Database) (*DatabaseStats, error) {
-	// Create a context with timeout
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 
-	// Get connection string
 	connStr := getMongoDBConnectionString(db)
-
-	// Create client options
 	clientOptions := options.Client().ApplyURI(connStr)
 
-	// Connect to MongoDB
 	client, err := mongo.Connect(ctx, clientOptions)
 	if err != nil {
 		return &DatabaseStats{TableCount: 0, Size: "Unknown"}, fmt.Errorf("failed to create MongoDB client: %v", err)
 	}
 	defer client.Disconnect(ctx)
 
-	// Ping the database
 	err = client.Ping(ctx, readpref.Primary())
 	if err != nil {
 		return &DatabaseStats{TableCount: 0, Size: "Unknown"}, fmt.Errorf("failed to connect to MongoDB: %v", err)
 	}
 
-	// Get database
-	database := client.Database(db.DatabaseName)
+	var dbName string
+	if db.ConnectionURI != "" {
+		parts := strings.Split(db.ConnectionURI, "/")
+		if len(parts) > 3 {
+			dbNameParts := strings.Split(parts[len(parts)-1], "?")
+			dbName = dbNameParts[0]
+		}
+	}
 
-	// Get collections (equivalent to tables in SQL)
+	if dbName == "" {
+		dbName = db.DatabaseName
+	}
+
+	database := client.Database(dbName)
 	collections, err := database.ListCollectionNames(ctx, bson.M{})
 	if err != nil {
 		return &DatabaseStats{TableCount: 0, Size: "Unknown"}, fmt.Errorf("failed to list collections: %v", err)
 	}
 
-	// Count non-system collections
 	collectionCount := 0
 	for _, collName := range collections {
 		if !strings.HasPrefix(collName, "system.") {
@@ -224,17 +266,14 @@ func fetchMongoDBStats(db *Database) (*DatabaseStats, error) {
 		}
 	}
 
-	// Get database stats
 	var stats bson.M
 	err = database.RunCommand(ctx, bson.D{{Key: "dbStats", Value: 1}, {Key: "scale", Value: 1024 * 1024}}).Decode(&stats)
 	if err != nil {
 		return &DatabaseStats{TableCount: collectionCount, Size: "Unknown"}, fmt.Errorf("failed to get database stats: %v", err)
 	}
 
-	// Extract size
 	size := "Unknown"
 	if dataSize, ok := stats["dataSize"].(float64); ok {
-		// Convert to bytes (MongoDB returns size in MB)
 		sizeBytes := int64(dataSize * 1024 * 1024)
 		size = formatSize(sizeBytes)
 	}
@@ -247,280 +286,173 @@ func fetchMongoDBStats(db *Database) (*DatabaseStats, error) {
 
 // executeMongoDBQuery executes a MongoDB query
 func executeMongoDBQuery(db *Database, query string, startTime time.Time) ([]QueryResult, string, error) {
-	// Create a context with timeout
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 
-	// Get connection string
 	connStr := getMongoDBConnectionString(db)
-
-	// Create client options
 	clientOptions := options.Client().ApplyURI(connStr)
 
-	// Connect to MongoDB
 	client, err := mongo.Connect(ctx, clientOptions)
 	if err != nil {
 		return nil, "", fmt.Errorf("failed to create MongoDB client: %v", err)
 	}
 	defer client.Disconnect(ctx)
 
-	// Ping the database
 	err = client.Ping(ctx, readpref.Primary())
 	if err != nil {
 		return nil, "", fmt.Errorf("failed to connect to MongoDB: %v", err)
 	}
 
-	// Get database
-	database := client.Database(db.DatabaseName)
-
-	// Check if the query is Go code (from AI) or a MongoDB query string
-	if strings.Contains(query, "collection :=") && strings.Contains(query, "operation :=") {
-		// This is Go code generated by the AI
-		return executeMongoDBGoCode(database, query, ctx, startTime)
-	}
-
-	// If not Go code, try to parse as a traditional MongoDB query string
-	// The query is expected to be in the format:
-	// db.collection.find({...}) or db.collection.aggregate([...])
-	parsedQuery, err := parseMongoDBQuery(query)
-	if err != nil {
-		return nil, "", err
-	}
-
-	// Execute the query
-	var results []bson.M
-	switch parsedQuery.Operation {
-	case "find":
-		findOptions, ok := parsedQuery.Options.(*options.FindOptions)
-		if !ok {
-			findOptions = options.Find()
-		}
-
-		// Log the find operation
-		fmt.Printf("Executing MongoDB find on collection '%s' with filter: %+v\n",
-			parsedQuery.Collection, parsedQuery.Filter)
-
-		cursor, err := database.Collection(parsedQuery.Collection).Find(ctx, parsedQuery.Filter, findOptions)
-		if err != nil {
-			return nil, "", fmt.Errorf("failed to execute find query: %v", err)
-		}
-		defer cursor.Close(ctx)
-
-		if err := cursor.All(ctx, &results); err != nil {
-			return nil, "", fmt.Errorf("failed to decode results: %v", err)
-		}
-	case "aggregate":
-		aggregateOptions, ok := parsedQuery.Options.(*options.AggregateOptions)
-		if !ok {
-			aggregateOptions = options.Aggregate()
-		}
-
-		// Log the aggregate operation
-		fmt.Printf("Executing MongoDB aggregate on collection '%s' with pipeline: %+v\n",
-			parsedQuery.Collection, parsedQuery.Pipeline)
-
-		// Convert the pipeline to the correct type if needed
-		var pipeline interface{}
-		switch p := parsedQuery.Pipeline.(type) {
-		case bson.A:
-			pipeline = p
-		case []interface{}:
-			pipeline = p
-		case []bson.M:
-			// Convert []bson.M to []interface{}
-			pipelineArr := make([]interface{}, len(p))
-			for i, stage := range p {
-				pipelineArr[i] = stage
-			}
-			pipeline = pipelineArr
-		default:
-			return nil, "", fmt.Errorf("unsupported pipeline type: %T", parsedQuery.Pipeline)
-		}
-
-		cursor, err := database.Collection(parsedQuery.Collection).Aggregate(ctx, pipeline, aggregateOptions)
-		if err != nil {
-			return nil, "", fmt.Errorf("failed to execute aggregate query: %v", err)
-		}
-		defer cursor.Close(ctx)
-
-		if err := cursor.All(ctx, &results); err != nil {
-			return nil, "", fmt.Errorf("failed to decode results: %v", err)
-		}
-	default:
-		return nil, "", fmt.Errorf("unsupported MongoDB operation: %s", parsedQuery.Operation)
-	}
-
-	// Convert results to QueryResult format and sanitize values
-	queryResults := make([]QueryResult, len(results))
-	for i, result := range results {
-		queryResult := make(QueryResult)
-		for key, value := range result {
-			// Sanitize the value to handle NaN, Infinity, etc.
-			queryResult[key] = sanitizeValue(value)
-		}
-		queryResults[i] = queryResult
-	}
-
-	// Calculate execution time
-	executionTime := time.Since(startTime).String()
-
-	return queryResults, executionTime, nil
-}
-
-// MongoDBParsedQuery represents a parsed MongoDB query
-type MongoDBParsedQuery struct {
-	Collection string
-	Operation  string
-	Filter     interface{}
-	Pipeline   interface{}
-	Options    interface{}
-}
-
-// parseAggregatePipeline parses a MongoDB aggregation pipeline string manually
-func parseAggregatePipeline(pipelineStr string) bson.A {
-	// This is a simplified parser for common aggregation operations
-	// It won't handle all complex cases but should work for basic pipelines
-	fmt.Printf("Manual parsing of aggregate pipeline: %s\n", pipelineStr)
-
-	// Remove outer brackets and whitespace
-	pipelineStr = strings.TrimSpace(pipelineStr)
-	pipelineStr = strings.TrimPrefix(pipelineStr, "[")
-	pipelineStr = strings.TrimSuffix(pipelineStr, "]")
-	pipelineStr = strings.TrimSpace(pipelineStr)
-
-	// Split by stages (each stage is a separate object)
-	// This is a simplified approach and may not work for all complex pipelines
-	var stages []string
-	braceCount := 0
-	currentStage := ""
-
-	for i := 0; i < len(pipelineStr); i++ {
-		char := pipelineStr[i]
-
-		if char == '{' {
-			braceCount++
-		} else if char == '}' {
-			braceCount--
-		}
-
-		currentStage += string(char)
-
-		// If we've completed a stage object and are at a comma or the end
-		if braceCount == 0 && (i == len(pipelineStr)-1 || (pipelineStr[i] == '}' && i+1 < len(pipelineStr) && pipelineStr[i+1] == ',')) {
-			stages = append(stages, strings.TrimSpace(currentStage))
-			currentStage = ""
-			// Skip the comma
-			if i+1 < len(pipelineStr) && pipelineStr[i+1] == ',' {
-				i++
-			}
+	var dbName string
+	if db.ConnectionURI != "" {
+		parts := strings.Split(db.ConnectionURI, "/")
+		if len(parts) > 3 {
+			dbNameParts := strings.Split(parts[len(parts)-1], "?")
+			dbName = dbNameParts[0]
 		}
 	}
 
-	// Now parse each stage into a bson.M
-	pipeline := bson.A{}
-
-	for _, stageStr := range stages {
-		// Convert MongoDB operators to a format that can be parsed
-		// Replace $operator with "$$operator" to make it valid JSON
-		processedStage := processMongoOperators(stageStr)
-
-		// Try to parse the stage
-		var stage bson.M
-		if err := bson.UnmarshalExtJSON([]byte(processedStage), true, &stage); err != nil {
-			fmt.Printf("Error parsing stage '%s': %v\n", processedStage, err)
-			continue
-		}
-
-		// Convert back the operators
-		stage = convertBackMongoOperators(stage)
-
-		pipeline = append(pipeline, stage)
+	if dbName == "" {
+		dbName = db.DatabaseName
 	}
 
-	fmt.Printf("Manually parsed pipeline: %+v\n", pipeline)
-	return pipeline
-}
-
-// processMongoOperators processes MongoDB operators to make them valid JSON
-func processMongoOperators(input string) string {
-	// This is a simplified approach
-	// Replace $operator with "$operator" to make it valid JSON
-	result := input
-
-	// Common MongoDB operators
-	operators := []string{"$match", "$group", "$sort", "$project", "$limit", "$skip", "$unwind", "$lookup", "$sum", "$avg", "$min", "$max", "$push"}
-
-	for _, op := range operators {
-		// Replace the operator at the beginning of a key
-		result = strings.ReplaceAll(result, op+":", "\""+op+"\":")
-	}
-
-	return result
-}
-
-// convertBackMongoOperators converts the operators back to their original form
-func convertBackMongoOperators(doc bson.M) bson.M {
-	// This function would convert back any special handling we did
-	// In this simplified version, we don't need to do anything
-	return doc
+	database := client.Database(dbName)
+	return executeMongoDBGoCode(database, query, ctx, startTime)
 }
 
 // executeMongoDBGoCode executes MongoDB queries from Go code generated by AI
 func executeMongoDBGoCode(database *mongo.Database, code string, ctx context.Context, startTime time.Time) ([]QueryResult, string, error) {
-	// Log a shorter version of the code for debugging
-	codeSummary := code
-	if len(codeSummary) > 100 {
-		codeSummary = codeSummary[:100] + "..."
-	}
-	fmt.Printf("Executing MongoDB Go code: %s\n", codeSummary)
+	fmt.Printf("Executing MongoDB Go code:\n%s\n", code)
 
 	// Extract collection name
-	collectionRegex := regexp.MustCompile(`collection\s*:=\s*"([^"]+)"`)
-	collectionMatches := collectionRegex.FindStringSubmatch(code)
-	if len(collectionMatches) < 2 {
-		return nil, "", fmt.Errorf("could not find collection name in the generated code")
+	collectionRegex := regexp.MustCompile(`var collection = "([^"]+)"`)
+	collectionMatch := collectionRegex.FindStringSubmatch(code)
+	if len(collectionMatch) < 2 {
+		return nil, "", fmt.Errorf("missing collection name in generated code")
 	}
-	collectionName := collectionMatches[1]
+	collectionName := collectionMatch[1]
 
 	// Extract operation type
-	operationRegex := regexp.MustCompile(`operation\s*:=\s*"([^"]+)"`)
-	operationMatches := operationRegex.FindStringSubmatch(code)
-	if len(operationMatches) < 2 {
-		return nil, "", fmt.Errorf("could not find operation type in the generated code")
+	operationRegex := regexp.MustCompile(`var operation = "([^"]+)"`)
+	operationMatch := operationRegex.FindStringSubmatch(code)
+	if len(operationMatch) < 2 {
+		return nil, "", fmt.Errorf("missing operation type in generated code")
 	}
-	operationType := operationMatches[1]
+	operationType := operationMatch[1]
 
-	// Execute based on operation type
-	var results []bson.M
+	var filter bson.M
+	var findOptions *options.FindOptions
+	var pipeline mongo.Pipeline
 
 	if operationType == "find" {
-		// Extract query filter
-		queryRegex := regexp.MustCompile(`query\s*:=\s*bson\.M\{([^}]+)\}`)
-		queryMatches := queryRegex.FindStringSubmatch(code)
-		if len(queryMatches) < 2 {
-			// Try empty query
-			queryMatches = []string{"", ""}
-		}
-
-		// Parse the query filter
-		filterStr := "{" + queryMatches[1] + "}"
-		filterStr = strings.ReplaceAll(filterStr, "'", "\"")
-
-		// Try to parse the filter
-		var filter bson.M
-		if filterStr == "{}" {
-			filter = bson.M{}
-		} else {
-			if err := bson.UnmarshalExtJSON([]byte(filterStr), true, &filter); err != nil {
-				// If parsing fails, use an empty filter
-				fmt.Printf("Error parsing filter '%s': %v. Using empty filter.\n", filterStr, err)
-				filter = bson.M{}
+		// Extract filter
+		filterRegex := regexp.MustCompile(`\*FILTER_START([\s\S]*?)\*FILTER_END`)
+		filterMatch := filterRegex.FindStringSubmatch(code)
+		if len(filterMatch) >= 2 {
+			filterContent := strings.TrimSpace(filterMatch[1])
+			if strings.HasPrefix(filterContent, "bson.M{") {
+				filterContent = strings.TrimPrefix(filterContent, "bson.M{")
+				filterContent = strings.TrimSuffix(filterContent, "}")
+				if filterContent != "" {
+					f, err := parseBSONM(filterContent)
+					if err == nil {
+						filter = f
+					} else {
+						fmt.Printf("Error parsing filter: %v\n", err)
+					}
+				}
 			}
 		}
 
-		// Execute find operation
-		fmt.Printf("Executing MongoDB find on collection '%s' with filter: %+v\n", collectionName, filter)
-		cursor, err := database.Collection(collectionName).Find(ctx, filter)
+		// Initialize findOptions
+		findOptions = options.Find()
+
+		// Extract sort
+		sortRegex := regexp.MustCompile(`\*SORT_START([\s\S]*?)\*SORT_END`)
+		sortMatch := sortRegex.FindStringSubmatch(code)
+		if len(sortMatch) >= 2 {
+			sortContent := strings.TrimSpace(sortMatch[1])
+			if strings.HasPrefix(sortContent, "bson.D{") {
+				sortContent = strings.TrimPrefix(sortContent, "bson.D{")
+				sortContent = strings.TrimSuffix(sortContent, "}")
+				sort, err := parseBSOND(sortContent)
+				if err == nil {
+					findOptions.SetSort(sort)
+				} else {
+					fmt.Printf("Error parsing sort: %v\n", err)
+				}
+			}
+		}
+
+		// Extract limit
+		limitRegex := regexp.MustCompile(`\*LIMIT_START([\s\S]*?)\*LIMIT_END`)
+		limitMatch := limitRegex.FindStringSubmatch(code)
+		if len(limitMatch) >= 2 {
+			limitContent := strings.TrimSpace(limitMatch[1])
+			if limit, err := strconv.ParseInt(limitContent, 10, 64); err == nil {
+				findOptions.SetLimit(limit)
+			} else {
+				fmt.Printf("Error parsing limit: %v\n", err)
+			}
+		}
+
+		// Extract projection
+		projRegex := regexp.MustCompile(`\*PROJECTION_START([\s\S]*?)\*PROJECTION_END`)
+		projMatch := projRegex.FindStringSubmatch(code)
+		if len(projMatch) >= 2 {
+			projContent := strings.TrimSpace(projMatch[1])
+			if strings.HasPrefix(projContent, "bson.D{") {
+				projContent = strings.TrimPrefix(projContent, "bson.D{")
+				projContent = strings.TrimSuffix(projContent, "}")
+				proj, err := parseBSOND(projContent)
+				if err == nil {
+					findOptions.SetProjection(proj)
+				} else {
+					fmt.Printf("Error parsing projection: %v\n", err)
+				}
+			}
+		}
+	} else if operationType == "aggregate" {
+		// Extract pipeline
+		pipelineRegex := regexp.MustCompile(`\*PIPELINE_START([\s\S]*?)\*PIPELINE_END`)
+		pipelineMatch := pipelineRegex.FindStringSubmatch(code)
+		if len(pipelineMatch) >= 2 {
+			pipelineContent := strings.TrimSpace(pipelineMatch[1])
+			pipelineContent = strings.TrimPrefix(pipelineContent, "mongo.Pipeline{")
+			pipelineContent = strings.TrimSuffix(pipelineContent, "}")
+			if pipelineContent != "" {
+				stages := splitPipelineStages(pipelineContent)
+				for _, stage := range stages {
+					stageContent := strings.TrimSpace(stage)
+					if strings.HasPrefix(stageContent, "bson.D{") {
+						stageContent = strings.TrimPrefix(stageContent, "bson.D{")
+						stageContent = strings.TrimSuffix(stageContent, "}")
+						s, err := parseBSOND(stageContent)
+						if err == nil {
+							pipeline = append(pipeline, s)
+						} else {
+							fmt.Printf("Error parsing pipeline stage: %v\n", err)
+						}
+					}
+				}
+			}
+		}
+	} else {
+		return nil, "", fmt.Errorf("unsupported MongoDB operation: %s", operationType)
+	}
+
+	var results []bson.M
+
+	if operationType == "find" {
+		if filter == nil {
+			filter = bson.M{}
+		}
+		if findOptions == nil {
+			findOptions = options.Find()
+		}
+
+		fmt.Printf("Executing find on collection '%s' with filter: %+v, options: %+v\n", collectionName, filter, findOptions)
+		cursor, err := database.Collection(collectionName).Find(ctx, filter, findOptions)
 		if err != nil {
 			return nil, "", fmt.Errorf("failed to execute find query: %v", err)
 		}
@@ -530,127 +462,14 @@ func executeMongoDBGoCode(database *mongo.Database, code string, ctx context.Con
 			return nil, "", fmt.Errorf("failed to decode results: %v", err)
 		}
 	} else if operationType == "aggregate" {
-		// For aggregate, we need to extract the pipeline stages
-		// This is more complex, so we'll use a simplified approach
-
-		// Create a direct pipeline with the stages we need
-		// This is a more direct approach that handles the specific format we're seeing
-		pipeline := bson.A{}
-
-		// Check for $sort stage with bson.D syntax
-		sortRegex := regexp.MustCompile(`\{\{"\$sort":\s*bson\.D\{\{"([^"]+)",\s*(-?\d+)\}\}\}\}`)
-		sortMatches := sortRegex.FindAllStringSubmatch(code, -1)
-		for _, match := range sortMatches {
-			if len(match) < 3 {
-				continue
-			}
-
-			fieldName := match[1] // e.g., "createdAt"
-			sortOrder := match[2] // e.g., "-1"
-
-			// Convert sort order to int
-			var order int
-			if sortOrder == "-1" {
-				order = -1
-			} else {
-				order = 1
-			}
-
-			// Create sort stage
-			sortStage := bson.M{"$sort": bson.M{fieldName: order}}
-			pipeline = append(pipeline, sortStage)
-			fmt.Printf("Added $sort stage: %+v\n", sortStage)
-		}
-
-		// Check for $limit stage
-		limitRegex := regexp.MustCompile(`\{\{"\$limit":\s*(\d+)\}\}`)
-		limitMatches := limitRegex.FindAllStringSubmatch(code, -1)
-		for _, match := range limitMatches {
-			if len(match) < 2 {
-				continue
-			}
-
-			limitStr := match[1] // e.g., "50"
-
-			// Convert limit to int
-			limit := 50 // Default
-			fmt.Sscanf(limitStr, "%d", &limit)
-
-			// Create limit stage
-			limitStage := bson.M{"$limit": limit}
-			pipeline = append(pipeline, limitStage)
-			fmt.Printf("Added $limit stage: %+v\n", limitStage)
-		}
-
-		// Check for $group stage with bson.M syntax
-		groupRegex := regexp.MustCompile(`\{\{"\$group":\s*bson\.M\{"_id":\s*([^,]+),\s*"([^"]+)":\s*bson\.M\{"\$sum":\s*"([^"]+)"\}\}\}\}`)
-		groupMatches := groupRegex.FindAllStringSubmatch(code, -1)
-		for _, match := range groupMatches {
-			if len(match) < 4 {
-				continue
-			}
-
-			idValue := match[1]   // e.g., "nil"
-			fieldName := match[2] // e.g., "totalValue"
-			sumField := match[3]  // e.g., "$payment.total"
-
-			// Create group stage
-			var groupId interface{}
-			if idValue == "nil" {
-				groupId = nil
-			} else {
-				groupId = idValue
-			}
-
-			groupStage := bson.M{
-				"$group": bson.M{
-					"_id":     groupId,
-					fieldName: bson.M{"$sum": sumField},
-				},
-			}
-			pipeline = append(pipeline, groupStage)
-			fmt.Printf("Added $group stage: %+v\n", groupStage)
-		}
-
-		// If no stages were parsed, try the original approach
 		if len(pipeline) == 0 {
-			// Extract pipeline
-			pipelineRegex := regexp.MustCompile(`pipeline\s*:=\s*mongo\.Pipeline\{([^}]+)\}`)
-			pipelineMatches := pipelineRegex.FindStringSubmatch(code)
-			if len(pipelineMatches) < 2 {
-				// Try another pattern
-				pipelineRegex = regexp.MustCompile(`pipeline\s*:=\s*mongo\.Pipeline\{([\s\S]+?)\}\s*//`)
-				pipelineMatches = pipelineRegex.FindStringSubmatch(code)
-				if len(pipelineMatches) < 2 {
-					// If we still can't find the pipeline, create a simple one
-					fmt.Printf("Could not find pipeline, using a simple pipeline\n")
-					pipeline = bson.A{
-						bson.M{"$match": bson.M{}},
-						bson.M{"$limit": 100},
-					}
-				}
-			}
-
-			// Extract stages
-			stagesStr := pipelineMatches[1]
-			manualStages := parseAggregatePipeline(stagesStr)
-			if len(manualStages) > 0 {
-				pipeline = manualStages
+			pipeline = mongo.Pipeline{
+				bson.D{{Key: "$match", Value: bson.M{}}},
+				bson.D{{Key: "$limit", Value: 100}},
 			}
 		}
 
-		// If we still couldn't parse any stages, create a simple pipeline
-		if len(pipeline) == 0 {
-			// Create a simple pipeline that returns all documents
-			fmt.Printf("No stages parsed, using a simple pipeline\n")
-			pipeline = bson.A{
-				bson.M{"$match": bson.M{}},
-				bson.M{"$limit": 100},
-			}
-		}
-
-		// Execute aggregate operation
-		fmt.Printf("Executing MongoDB aggregate on collection '%s' with pipeline: %+v\n", collectionName, pipeline)
+		fmt.Printf("Executing aggregate on collection '%s' with pipeline: %+v\n", collectionName, pipeline)
 		cursor, err := database.Collection(collectionName).Aggregate(ctx, pipeline)
 		if err != nil {
 			return nil, "", fmt.Errorf("failed to execute aggregate query: %v", err)
@@ -660,43 +479,193 @@ func executeMongoDBGoCode(database *mongo.Database, code string, ctx context.Con
 		if err := cursor.All(ctx, &results); err != nil {
 			return nil, "", fmt.Errorf("failed to decode results: %v", err)
 		}
-	} else {
-		return nil, "", fmt.Errorf("unsupported MongoDB operation: %s", operationType)
 	}
 
-	// Convert results to QueryResult format and sanitize values
 	queryResults := make([]QueryResult, len(results))
 	for i, result := range results {
 		queryResult := make(QueryResult)
 		for key, value := range result {
-			// Sanitize the value to handle NaN, Infinity, etc.
 			queryResult[key] = sanitizeValue(value)
 		}
 		queryResults[i] = queryResult
 	}
 
-	// Calculate execution time
 	executionTime := time.Since(startTime).String()
-
 	return queryResults, executionTime, nil
+}
+
+// parseBSONM parses a bson.M string into a bson.M map, handling dot notation
+func parseBSONM(content string) (bson.M, error) {
+	result := bson.M{}
+	content = strings.TrimSpace(strings.TrimSuffix(content, ","))
+	if content == "" {
+		return result, nil
+	}
+
+	pairs := splitBSONPairs(content)
+	for _, pair := range pairs {
+		parts := strings.SplitN(pair, ":", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		key := strings.Trim(strings.TrimSpace(parts[0]), `"`)
+		valueStr := strings.TrimSpace(parts[1])
+
+		if strings.HasPrefix(valueStr, "bson.M{") {
+			nestedContent := strings.TrimPrefix(valueStr, "bson.M{")
+			nestedContent = strings.TrimSuffix(nestedContent, "}")
+			nested, err := parseBSONM(nestedContent)
+			if err != nil {
+				return nil, fmt.Errorf("failed to parse nested bson.M: %v", err)
+			}
+			result[key] = nested
+		} else if valueStr == "nil" {
+			result[key] = nil
+		} else {
+			var value interface{}
+			if strings.HasPrefix(valueStr, `"`) && strings.HasSuffix(valueStr, `"`) {
+				value = strings.Trim(valueStr, `"`)
+			} else if num, err := strconv.ParseInt(valueStr, 10, 64); err == nil {
+				value = num
+			} else if num, err := strconv.ParseFloat(valueStr, 64); err == nil {
+				value = num
+			} else {
+				value = valueStr
+			}
+			result[key] = value
+		}
+	}
+
+	return result, nil
+}
+
+// parseBSOND parses a bson.D string into a bson.D slice
+func parseBSOND(content string) (bson.D, error) {
+	var result bson.D
+	content = strings.TrimSpace(strings.TrimSuffix(content, ","))
+	if content == "" {
+		return result, nil
+	}
+
+	pairs := splitBSONPairs(content)
+	for _, pair := range pairs {
+		pair = strings.TrimSpace(pair)
+		if !strings.HasPrefix(pair, "{") || !strings.HasSuffix(pair, "}") {
+			continue
+		}
+		pair = strings.TrimPrefix(pair, "{")
+		pair = strings.TrimSuffix(pair, "}")
+
+		parts := strings.SplitN(pair, ",", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		key := strings.Trim(strings.TrimSpace(parts[0]), `"`)
+		valueStr := strings.TrimSpace(parts[1])
+
+		var value interface{}
+		if strings.HasPrefix(valueStr, "bson.M{") {
+			nestedContent := strings.TrimPrefix(valueStr, "bson.M{")
+			nestedContent = strings.TrimSuffix(nestedContent, "}")
+			nested, err := parseBSONM(nestedContent)
+			if err != nil {
+				return nil, fmt.Errorf("failed to parse bson.M in bson.D: %v", err)
+			}
+			value = nested
+		} else if strings.HasPrefix(valueStr, `"`) && strings.HasSuffix(valueStr, `"`) {
+			value = strings.Trim(valueStr, `"`)
+		} else if valueStr == "nil" {
+			value = nil
+		} else if num, err := strconv.ParseInt(valueStr, 10, 64); err == nil {
+			value = int32(num) // MongoDB typically uses int32 for sort/projection values
+		} else if num, err := strconv.ParseFloat(valueStr, 64); err == nil {
+			value = num
+		} else {
+			return nil, fmt.Errorf("unsupported value type in bson.D: %s", valueStr)
+		}
+
+		result = append(result, bson.E{Key: key, Value: value})
+	}
+
+	return result, nil
+}
+
+// splitBSONPairs splits a bson.M or bson.D string into key-value pairs, respecting nested structures
+func splitBSONPairs(content string) []string {
+	var pairs []string
+	var current strings.Builder
+	depth := 0
+	inQuotes := false
+
+	for _, r := range content {
+		if r == '"' {
+			inQuotes = !inQuotes
+		}
+		if !inQuotes {
+			if r == '{' {
+				depth++
+			} else if r == '}' {
+				depth--
+			} else if r == ',' && depth == 0 {
+				pairs = append(pairs, current.String())
+				current.Reset()
+				continue
+			}
+		}
+		current.WriteRune(r)
+	}
+
+	if current.String() != "" {
+		pairs = append(pairs, current.String())
+	}
+	return pairs
+}
+
+// splitPipelineStages splits a pipeline string into individual stages
+func splitPipelineStages(content string) []string {
+	var stages []string
+	var current strings.Builder
+	depth := 0
+	inQuotes := false
+
+	for _, r := range content {
+		if r == '"' {
+			inQuotes = !inQuotes
+		}
+		if !inQuotes {
+			if r == '{' {
+				depth++
+			} else if r == '}' {
+				depth--
+			} else if r == ',' && depth == 0 {
+				stages = append(stages, current.String())
+				current.Reset()
+				continue
+			}
+		}
+		current.WriteRune(r)
+	}
+
+	if current.String() != "" {
+		stages = append(stages, current.String())
+	}
+	return stages
 }
 
 // sanitizeValue handles special values like NaN and Infinity that can't be serialized to JSON
 func sanitizeValue(value interface{}) interface{} {
-	// Check for float64 NaN or Infinity
 	if f, ok := value.(float64); ok {
 		if math.IsNaN(f) {
-			return "NaN" // Convert NaN to string
+			return "NaN"
 		}
 		if math.IsInf(f, 1) {
-			return "Infinity" // Convert positive infinity to string
+			return "Infinity"
 		}
 		if math.IsInf(f, -1) {
-			return "-Infinity" // Convert negative infinity to string
+			return "-Infinity"
 		}
 	}
 
-	// Handle maps recursively
 	if m, ok := value.(map[string]interface{}); ok {
 		result := make(map[string]interface{})
 		for k, v := range m {
@@ -705,7 +674,6 @@ func sanitizeValue(value interface{}) interface{} {
 		return result
 	}
 
-	// Handle slices recursively
 	if s, ok := value.([]interface{}); ok {
 		result := make([]interface{}, len(s))
 		for i, v := range s {
@@ -714,97 +682,5 @@ func sanitizeValue(value interface{}) interface{} {
 		return result
 	}
 
-	// Return the value as is for other types
 	return value
-}
-
-// parseMongoDBQuery parses a MongoDB query string
-func parseMongoDBQuery(queryStr string) (*MongoDBParsedQuery, error) {
-	// Log the incoming query for debugging
-	fmt.Printf("Parsing MongoDB query: %s\n", queryStr)
-
-	// Remove whitespace and db. prefix if present
-	queryStr = strings.TrimSpace(queryStr)
-	queryStr = strings.TrimPrefix(queryStr, "db.")
-
-	// Split by first dot to get collection name
-	parts := strings.SplitN(queryStr, ".", 2)
-	if len(parts) < 2 {
-		return nil, fmt.Errorf("invalid MongoDB query format: %s", queryStr)
-	}
-
-	collection := parts[0]
-	operationWithArgs := parts[1]
-
-	// Split operation and arguments
-	opParts := strings.SplitN(operationWithArgs, "(", 2)
-	if len(opParts) < 2 {
-		return nil, fmt.Errorf("invalid MongoDB query format: %s", queryStr)
-	}
-
-	operation := opParts[0]
-	argsStr := opParts[1]
-
-	// Remove trailing parenthesis
-	argsStr = strings.TrimSuffix(argsStr, ")")
-
-	// Log the parsed components
-	fmt.Printf("Parsed MongoDB query - Collection: %s, Operation: %s\n", collection, operation)
-
-	// Parse arguments based on operation
-	parsedQuery := &MongoDBParsedQuery{
-		Collection: collection,
-		Operation:  operation,
-	}
-
-	switch operation {
-	case "find":
-		// Handle empty filter case
-		if strings.TrimSpace(argsStr) == "" || strings.TrimSpace(argsStr) == "{}" {
-			parsedQuery.Filter = bson.M{}
-		} else {
-			// Parse filter
-			var filter bson.M
-			if err := bson.UnmarshalExtJSON([]byte(argsStr), true, &filter); err != nil {
-				fmt.Printf("Error parsing MongoDB find filter: %v\n", err)
-				return nil, fmt.Errorf("failed to parse MongoDB find filter: %v", err)
-			}
-			parsedQuery.Filter = filter
-		}
-		parsedQuery.Options = options.Find()
-
-	case "aggregate":
-		// Handle empty pipeline case
-		if strings.TrimSpace(argsStr) == "" || strings.TrimSpace(argsStr) == "[]" {
-			parsedQuery.Pipeline = bson.A{}
-		} else {
-			// For aggregate, we need to manually parse the pipeline
-			// because MongoDB's aggregation pipeline uses $ operators which can cause issues with JSON parsing
-
-			// First, let's try to convert the string to a valid JSON format
-			// Replace single quotes with double quotes if present
-			argsStr = strings.ReplaceAll(argsStr, "'", "\"")
-
-			// Try to parse as extended JSON
-			var pipeline bson.A
-			if err := bson.UnmarshalExtJSON([]byte(argsStr), true, &pipeline); err != nil {
-				fmt.Printf("Error parsing MongoDB aggregate pipeline with extended JSON: %v\n", err)
-
-				// If that fails, try a more manual approach for simple cases
-				// This is a simplified approach and may not work for all complex pipelines
-				pipeline = parseAggregatePipeline(argsStr)
-				if len(pipeline) == 0 {
-					return nil, fmt.Errorf("failed to parse MongoDB aggregate pipeline: %v", err)
-				}
-			}
-			parsedQuery.Pipeline = pipeline
-			fmt.Printf("Parsed pipeline: %+v\n", pipeline)
-		}
-		parsedQuery.Options = options.Aggregate()
-
-	default:
-		return nil, fmt.Errorf("unsupported MongoDB operation: %s", operation)
-	}
-
-	return parsedQuery, nil
 }

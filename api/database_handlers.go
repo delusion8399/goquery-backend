@@ -2,7 +2,6 @@ package api
 
 import (
 	"context"
-	"fmt"
 	"log"
 	"time"
 
@@ -13,14 +12,15 @@ import (
 
 // DatabaseRequest represents the request body for database operations
 type DatabaseRequest struct {
-	Name         string `json:"name"`
-	Type         string `json:"type"`
-	Host         string `json:"host"`
-	Port         string `json:"port"`
-	Username     string `json:"username"`
-	Password     string `json:"password"`
-	DatabaseName string `json:"database"`
-	SSL          bool   `json:"ssl"`
+	Name          string `json:"name"`
+	Type          string `json:"type"`
+	Host          string `json:"host"`
+	Port          string `json:"port"`
+	Username      string `json:"username"`
+	Password      string `json:"password"`
+	DatabaseName  string `json:"database"`
+	SSL           bool   `json:"ssl"`
+	ConnectionURI string `json:"connection_uri"`
 }
 
 // CreateDatabaseHandler handles creating a new database connection
@@ -44,21 +44,23 @@ func CreateDatabaseHandler() fiber.Handler {
 			})
 		}
 
-		// Create context with timeout
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second) // Increased timeout for schema fetching
+		// Create context with timeout for initial operations
+		// We'll create a separate context with longer timeout for schema operations
+		_, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 
 		// Create database
 		db := &models.Database{
-			UserID:       userID,
-			Name:         req.Name,
-			Type:         req.Type,
-			Host:         req.Host,
-			Port:         req.Port,
-			Username:     req.Username,
-			Password:     req.Password,
-			DatabaseName: req.DatabaseName,
-			SSL:          req.SSL,
+			UserID:        userID,
+			Name:          req.Name,
+			Type:          req.Type,
+			Host:          req.Host,
+			Port:          req.Port,
+			Username:      req.Username,
+			Password:      req.Password,
+			DatabaseName:  req.DatabaseName,
+			SSL:           req.SSL,
+			ConnectionURI: req.ConnectionURI,
 		}
 
 		// Test connection
@@ -68,20 +70,27 @@ func CreateDatabaseHandler() fiber.Handler {
 			})
 		}
 
+		// Create a new context with a longer timeout for schema fetching
+		// We don't use the context directly here, but we create it to ensure the operation has enough time
+		_, schemaCancel := context.WithTimeout(context.Background(), 180*time.Second)
+		defer schemaCancel()
+
 		// Fetch schema
+		log.Printf("Fetching schema for database %s...", db.Name)
 		schema, err := models.FetchDatabaseSchema(db)
 
-		fmt.Println(schema)
 		if err != nil {
 			// Log the error but don't fail the request
 			log.Printf("Failed to fetch schema: %v", err)
 			// Initialize with empty schema
 			db.Schema = &models.Schema{Tables: []models.Table{}}
 		} else {
+			log.Printf("Schema fetched successfully with %d tables", len(schema.Tables))
 			db.Schema = schema
 		}
 
 		// Fetch stats
+		log.Printf("Fetching stats for database %s...", db.Name)
 		stats, err := models.FetchDatabaseStats(db)
 		if err != nil {
 			// Log the error but don't fail the request
@@ -95,12 +104,14 @@ func CreateDatabaseHandler() fiber.Handler {
 		db.LastConnected = &now
 
 		// Save database
-		createdDB, err := models.CreateDatabase(ctx, db)
+		log.Printf("Saving new database with schema containing %d tables...", len(db.Schema.Tables))
+		createdDB, err := models.CreateDatabase(context.Background(), db)
 		if err != nil {
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 				"error": "Failed to save database: " + err.Error(),
 			})
 		}
+		log.Printf("Database created successfully")
 
 		// Return response
 		return c.Status(fiber.StatusCreated).JSON(createdDB)
@@ -147,7 +158,7 @@ func GetDatabaseHandler() fiber.Handler {
 		}
 
 		// Create context with timeout
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 		defer cancel()
 
 		// Get database
@@ -175,6 +186,11 @@ func GetDatabaseHandler() fiber.Handler {
 		// Check if refresh parameter is set
 		refresh := c.Query("refresh") == "true"
 		if refresh {
+			// Create a new context with a longer timeout for schema fetching
+			// We don't use the context directly here, but we create it to ensure the operation has enough time
+			_, schemaCancel := context.WithTimeout(context.Background(), 180*time.Second)
+			defer schemaCancel()
+
 			// Test connection
 			if err := models.TestConnection(db); err != nil {
 				return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
@@ -183,19 +199,21 @@ func GetDatabaseHandler() fiber.Handler {
 			}
 
 			// Fetch schema
+			log.Printf("Fetching schema for database %s (%s)...", db.Name, db.ID.Hex())
 			schema, err := models.FetchDatabaseSchema(db)
 
-			fmt.Println(schema)
 			if err != nil {
 				// Log the error but don't fail the request
 				log.Printf("Failed to fetch schema: %v", err)
 				// Initialize with empty schema
 				db.Schema = &models.Schema{Tables: []models.Table{}}
 			} else {
+				log.Printf("Schema fetched successfully with %d tables", len(schema.Tables))
 				db.Schema = schema
 			}
 
 			// Fetch stats
+			log.Printf("Fetching stats for database %s...", db.Name)
 			stats, err := models.FetchDatabaseStats(db)
 			if err != nil {
 				// Log the error but don't fail the request
@@ -209,11 +227,13 @@ func GetDatabaseHandler() fiber.Handler {
 			db.LastConnected = &now
 
 			// Save updated database
-			if err := models.UpdateDatabase(ctx, db); err != nil {
+			log.Printf("Saving updated database schema with %d tables...", len(db.Schema.Tables))
+			if err := models.UpdateDatabase(context.Background(), db); err != nil {
 				return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 					"error": "Failed to update database: " + err.Error(),
 				})
 			}
+			log.Printf("Database schema updated successfully")
 		}
 
 		// Return response
@@ -280,6 +300,7 @@ func UpdateDatabaseHandler() fiber.Handler {
 		}
 		db.DatabaseName = req.DatabaseName
 		db.SSL = req.SSL
+		db.ConnectionURI = req.ConnectionURI
 
 		// Test connection
 		if err := models.TestConnection(db); err != nil {
@@ -288,7 +309,13 @@ func UpdateDatabaseHandler() fiber.Handler {
 			})
 		}
 
+		// Create a new context with a longer timeout for schema fetching
+		// We don't use the context directly here, but we create it to ensure the operation has enough time
+		_, schemaCancel := context.WithTimeout(context.Background(), 180*time.Second)
+		defer schemaCancel()
+
 		// Fetch schema
+		log.Printf("Fetching schema for database %s (%s)...", db.Name, db.ID.Hex())
 		schema, err := models.FetchDatabaseSchema(db)
 		if err != nil {
 			// Log the error but don't fail the request
@@ -296,10 +323,12 @@ func UpdateDatabaseHandler() fiber.Handler {
 			// Initialize with empty schema
 			db.Schema = &models.Schema{Tables: []models.Table{}}
 		} else {
+			log.Printf("Schema fetched successfully with %d tables", len(schema.Tables))
 			db.Schema = schema
 		}
 
 		// Fetch stats
+		log.Printf("Fetching stats for database %s...", db.Name)
 		stats, err := models.FetchDatabaseStats(db)
 		if err != nil {
 			// Log the error but don't fail the request
@@ -313,11 +342,13 @@ func UpdateDatabaseHandler() fiber.Handler {
 		db.LastConnected = &now
 
 		// Save database
-		if err := models.UpdateDatabase(ctx, db); err != nil {
+		log.Printf("Saving updated database schema with %d tables...", len(db.Schema.Tables))
+		if err := models.UpdateDatabase(context.Background(), db); err != nil {
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 				"error": "Failed to update database: " + err.Error(),
 			})
 		}
+		log.Printf("Database schema updated successfully")
 
 		// Return response
 		return c.JSON(db)
@@ -391,14 +422,15 @@ func TestConnectionHandler() fiber.Handler {
 
 		// Create database object
 		db := &models.Database{
-			Name:         req.Name,
-			Type:         req.Type,
-			Host:         req.Host,
-			Port:         req.Port,
-			Username:     req.Username,
-			Password:     req.Password,
-			DatabaseName: req.DatabaseName,
-			SSL:          req.SSL,
+			Name:          req.Name,
+			Type:          req.Type,
+			Host:          req.Host,
+			Port:          req.Port,
+			Username:      req.Username,
+			Password:      req.Password,
+			DatabaseName:  req.DatabaseName,
+			SSL:           req.SSL,
+			ConnectionURI: req.ConnectionURI,
 		}
 
 		// Test connection
@@ -413,16 +445,28 @@ func TestConnectionHandler() fiber.Handler {
 			"message": "Connection successful",
 		}
 
+		// Create a new context with a longer timeout for schema fetching
+		// We don't use the context directly here, but we create it to ensure the operation has enough time
+		_, schemaCancel := context.WithTimeout(context.Background(), 180*time.Second)
+		defer schemaCancel()
+
 		// Fetch schema (but don't fail if it doesn't work)
+		log.Printf("Testing schema fetch for database %s...", db.Name)
 		schema, err := models.FetchDatabaseSchema(db)
 		if err == nil && schema != nil {
+			log.Printf("Schema test successful, found %d tables", len(schema.Tables))
 			response["table_count"] = len(schema.Tables)
+		} else if err != nil {
+			log.Printf("Schema test warning: %v", err)
 		}
 
 		// Fetch stats (but don't fail if it doesn't work)
+		log.Printf("Testing stats fetch for database %s...", db.Name)
 		stats, err := models.FetchDatabaseStats(db)
 		if err == nil && stats != nil {
 			response["database_size"] = stats.Size
+		} else if err != nil {
+			log.Printf("Stats test warning: %v", err)
 		}
 
 		// Return response
